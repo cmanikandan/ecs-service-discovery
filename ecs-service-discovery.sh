@@ -9,6 +9,12 @@ declare TASK
 declare IPS
 declare IP
 
+declare CHANGES
+declare RESOURCE_RECORDS
+declare RESOURCE_RECORD
+declare CHANGE
+declare CHANGE_BATCH
+
 __help() {
     cat << __END
 ECS Service Discovery for Amazon Web Services
@@ -19,6 +25,7 @@ Options:
   -f <filter>    Filter service names using a grep-compatible regex.
   -p <prefix>    Prefix to put in front of the service name in Route 53.
   -s <suffix>    Suffix to append to the service name in Route 53.
+  -t <ttl>       TTL in seconds for the A records in Route 53 (default: 5).
   -z <zone>      Route 53 zone to update.
   -h             Print this help message and exit.
 
@@ -42,7 +49,6 @@ __list_services() {
     local CLUSTER="$1"
     local FILTER="$2"
 
-    # TODO: apply filter
     local SERVICES="$(aws ecs list-services --cluster "${CLUSTER}" --query 'serviceArns[*]' --output text)"
     if [ "$?" -ne 0 ]; then
         printf "fatal error: unable to list services of cluster '%s'\n" "${CLUSTER}" >&2
@@ -78,15 +84,68 @@ __describe_task() {
     echo "${IPS}"
 }
 
+__resource_record() {
+    local IP="$1"
+
+    local RESOURCE_RECORD='{ "Value": "__VALUE__" }'
+
+    RESOURCE_RECORD="${RESOURCE_RECORD/__VALUE__/${IP}}"
+
+    echo "${RESOURCE_RECORD}"
+}
+
+__change() {
+    local SERVICE="$1"
+    local RESOURCE_RECORDS="$2"
+    local ZONE="$3"
+    local TTL="$4"
+    local PREFIX="$5"
+    local SUFFIX="$6"
+
+    local CHANGE='{ "Action": "UPSERT", "ResourceRecordSet": { "Name": "__NAME__", "Type": "A", "TTL": __TTL__, "ResourceRecords": [ __RESOURCE_RECORDS__ ] } }'
+
+    if [ -n "${RESOURCE_RECORDS}" ]; then
+        local NAME="__PREFIX____SERVICE____SUFFIX__.__ZONE__"
+
+        NAME="${NAME/__SERVICE__/${SERVICE}}"
+        NAME="${NAME/__ZONE__/${ZONE}}"
+        NAME="${NAME/__PREFIX__/${PREFIX}}"
+        NAME="${NAME/__SUFFIX__/${SUFFIX}}"
+
+        CHANGE="${CHANGE/__NAME__/${NAME}}"
+        CHANGE="${CHANGE/__RESOURCE_RECORDS__/${RESOURCE_RECORDS}}"
+        CHANGE="${CHANGE/__TTL__/${TTL}}"
+    else
+        CHANGE=""
+    fi
+
+    echo "${CHANGE}"
+}
+
+__change_batch() {
+    local CHANGES="$1"
+
+    local CHANGE_BATCH='{ "Changes": [ __CHANGES__ ] }'
+
+    if [ -n "${CHANGES}" ]; then
+        CHANGE_BATCH="${CHANGE_BATCH/__CHANGES__/${CHANGES}}"
+    else
+        CHANGE_BATCH=""
+    fi
+
+    echo "${CHANGE_BATCH}"
+}
+
 # main
 
 declare DRY_RUN
 declare FILTER
 declare PREFIX
 declare SUFFIX
+declare TTL
 declare ZONE
 
-while getopts :df:hp:s:z: OPT; do
+while getopts :df:hp:s:t:z: OPT; do
     case "${OPT}" in
         h)
             __help
@@ -109,6 +168,10 @@ while getopts :df:hp:s:z: OPT; do
             SUFFIX="${OPTARG}"
             ;;
 
+        t)
+            TTL="${OPTARG}"
+            ;;
+
         z)
             ZONE="${OPTARG}"
             ;;
@@ -126,6 +189,10 @@ while getopts :df:hp:s:z: OPT; do
 
                 s)
                     printf "missing suffix" >&2
+                    ;;
+
+                t)
+                    printf "missing ttl" >&2
                     ;;
 
                 z)
@@ -150,26 +217,52 @@ if [ -z "$*" ]; then
     exit 1
 fi
 
+if [ -z "${TTL}" ]; then
+    TTL=5
+fi
+
 CLUSTERS="$*"
 for CLUSTER in ${CLUSTERS}; do
     printf "cluster: %s\n" "${CLUSTER}"
 
+    CHANGES=""
+
     SERVICES="$(__list_services "${CLUSTER}" "${FILTER}")"
     for SERVICE in ${SERVICES}; do
         SERVICE="${SERVICE##*/}"
-        printf "    service: %s\n" "${SERVICE}"
 
-        TASKS="$(__list_tasks "${CLUSTER}" "${SERVICE}")"
-        for TASK in ${TASKS}; do
-            TASK="${TASK##*/}"
-            printf "        task: %s\n" "${TASK}"
+        if [[ "$SERVICE" =~ $FILTER ]]; then
+            printf "    service: %s\n" "${SERVICE}"
 
-            IPS="$(__describe_task "${CLUSTER}" "${TASK}")"
-            for IP in ${IPS}; do
-                printf "            ip: %s\n" "${IP}"
+            RESOURCE_RECORDS=""
+
+            TASKS="$(__list_tasks "${CLUSTER}" "${SERVICE}")"
+            for TASK in ${TASKS}; do
+                TASK="${TASK##*/}"
+                printf "        task: %s\n" "${TASK}"
+
+                IPS="$(__describe_task "${CLUSTER}" "${TASK}")"
+                for IP in ${IPS}; do
+                    printf "            ip: %s\n" "${IP}"
+
+                    RESOURCE_RECORD="$(__resource_record "${IP}")"
+                    RESOURCE_RECORDS="${RESOURCE_RECORDS},${RESOURCE_RECORD}"
+                done
             done
-        done
+
+            RESOURCE_RECORDS="${RESOURCE_RECORDS#,}"
+
+            CHANGE="$(__change "${SERVICE}" "${RESOURCE_RECORDS}" "${ZONE:-${CLUSTER}}" "${TTL}" "${PREFIX}" "${SUFFIX}")"
+
+            CHANGES="${CHANGES},${CHANGE}"
+        fi
     done
+
+    CHANGES="${CHANGES#,}"
+
+    CHANGE_BATCH="$(__change_batch "${CHANGES}")"
+
+    printf "\nchange batch:\n\n%s\n" "${CHANGE_BATCH}"
 done
 
 exit 0
