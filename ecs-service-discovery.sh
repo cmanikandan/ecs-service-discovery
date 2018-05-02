@@ -1,22 +1,5 @@
 #!/usr/bin/env sh
 
-declare CLUSTERS
-declare CLUSTER
-declare SERVICES
-declare SERVICE
-declare TASKS
-declare TASK
-declare IPS
-declare IP
-
-declare CHANGES
-declare RESOURCE_RECORDS
-declare RESOURCE_RECORD
-declare CHANGE
-declare CHANGE_BATCH
-declare ZONE_ID
-declare CHANGE_INFO
-
 __help() {
     cat << __END
 ECS Service Discovery for Amazon Web Services
@@ -90,13 +73,13 @@ __describe_task() {
 __list_hosted_zones() {
     local ZONE="$1"
 
-    local ZONE="$(aws route53 list-hosted-zones --query 'HostedZones[?Name==`'${ZONE}'.`].Id' --output text)"
+    local ZONE_ID="$(aws route53 list-hosted-zones --query 'HostedZones[?Name==`'${ZONE}'.`].Id' --output text)"
     if [ "$?" != "0" ]; then
         printf "fatal error: unable to list hosted zones ('%s')\n" "${ZONE}" >&2
         exit 1
     fi
 
-    printf "${ZONE}"
+    printf "${ZONE_ID}"
 }
 
 __change_resource_record_sets() {
@@ -184,6 +167,23 @@ declare TTL
 declare DO_NOT_WAIT
 declare ZONE
 declare ZONE_SPECIFIED
+
+declare CLUSTERS
+declare CLUSTER
+declare SERVICES
+declare SERVICE
+declare TASKS
+declare TASK
+declare IPS
+declare IP
+
+declare CHANGES
+declare RESOURCE_RECORDS
+declare RESOURCE_RECORD
+declare CHANGE
+declare CHANGE_BATCH
+declare ZONE_ID
+declare CHANGE_INFO
 
 while getopts :df:hp:s:t:z: OPT; do
     case "${OPT}" in
