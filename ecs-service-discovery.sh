@@ -14,6 +14,8 @@ declare RESOURCE_RECORDS
 declare RESOURCE_RECORD
 declare CHANGE
 declare CHANGE_BATCH
+declare ZONE_ID
+declare CHANGE_INFO
 
 __help() {
     cat << __END
@@ -26,6 +28,7 @@ Options:
   -p <prefix>    Prefix to put in front of the service name in Route 53.
   -s <suffix>    Suffix to append to the service name in Route 53.
   -t <ttl>       TTL in seconds for the A records in Route 53 (default: 5).
+  -w             Do NOT wait for the change batch to be synced.
   -z <zone>      Route 53 zone to update.
   -h             Print this help message and exit.
 
@@ -50,12 +53,12 @@ __list_services() {
     local FILTER="$2"
 
     local SERVICES="$(aws ecs list-services --cluster "${CLUSTER}" --query 'serviceArns[*]' --output text)"
-    if [ "$?" -ne 0 ]; then
+    if [ "$?" != "0" ]; then
         printf "fatal error: unable to list services of cluster '%s'\n" "${CLUSTER}" >&2
         exit 1
     fi
 
-    echo "${SERVICES}"
+    printf "${SERVICES}"
 }
 
 __list_tasks() {
@@ -63,12 +66,12 @@ __list_tasks() {
     local SERVICE="$2"
 
     local TASKS="$(aws ecs list-tasks --cluster "${CLUSTER}" --service-name "${SERVICE}" --query 'taskArns[*]' --output text)"
-    if [ "$?" -ne 0 ]; then
+    if [ "$?" != "0" ]; then
         printf "fatal error: unable to list tasks of service '%s' of cluster '%s'\n" "${SERVICE}" "${CLUSTER}" >&2
         exit 1
     fi
 
-    echo "${TASKS}"
+    printf "${TASKS}"
 }
 
 __describe_task() {
@@ -76,12 +79,47 @@ __describe_task() {
     local TASK="$2"
 
     local IPS="$(aws ecs describe-tasks --cluster "${CLUSTER}" --task "${TASK}" --query 'tasks[*].containers[?lastStatus==`RUNNING`].networkInterfaces[*].privateIpv4Address' --output text)"
-    if [ "$?" -ne 0 ]; then
+    if [ "$?" != "0" ]; then
         printf "fatal error: unable to describe task '%s' of cluster '%s'\n" "${TASK}" "${CLUSTER}" >&2
         exit 1
     fi
 
-    echo "${IPS}"
+    printf "${IPS}"
+}
+
+__list_hosted_zones() {
+    local ZONE="$1"
+
+    local ZONE="$(aws route53 list-hosted-zones --query 'HostedZones[?Name==`'${ZONE}'.`].Id' --output text)"
+    if [ "$?" != "0" ]; then
+        printf "fatal error: unable to list hosted zones ('%s')\n" "${ZONE}" >&2
+        exit 1
+    fi
+
+    printf "${ZONE}"
+}
+
+__change_resource_record_sets() {
+    local ZONE_ID="$1"
+    local CHANGE_BATCH="$2"
+
+    local CHANGE_INFO="$(aws route53 change-resource-record-sets --hosted-zone-id "${ZONE_ID}" --change-batch "${CHANGE_BATCH}" --query 'ChangeInfo.Id' --output text)"
+    if [ "$?" != "0" ]; then
+        printf "fatal error: unable to change resource record sets for zone id '%s'\n" "${ZONE_ID}" >&2
+        exit 1
+    fi
+
+    printf "${CHANGE_INFO}"
+}
+
+__wait_resource_record_sets_changed() {
+    local CHANGE_INFO="$1"
+
+    aws route53 wait resource-record-sets-changed --id "${CHANGE_INFO}"
+    if [ "$?" != "0" ]; then
+        printf "fatal error: unable to wait for resource record sets to be changed for change info '%s'\n" "${CHANGE_INFO}" >&2
+        exit 1
+    fi
 }
 
 __resource_record() {
@@ -91,7 +129,7 @@ __resource_record() {
 
     RESOURCE_RECORD="${RESOURCE_RECORD/__VALUE__/${IP}}"
 
-    echo "${RESOURCE_RECORD}"
+    printf "${RESOURCE_RECORD}"
 }
 
 __change() {
@@ -119,7 +157,7 @@ __change() {
         CHANGE=""
     fi
 
-    echo "${CHANGE}"
+    printf "${CHANGE}"
 }
 
 __change_batch() {
@@ -133,7 +171,7 @@ __change_batch() {
         CHANGE_BATCH=""
     fi
 
-    echo "${CHANGE_BATCH}"
+    printf "${CHANGE_BATCH}"
 }
 
 # main
@@ -143,7 +181,9 @@ declare FILTER
 declare PREFIX
 declare SUFFIX
 declare TTL
+declare DO_NOT_WAIT
 declare ZONE
+declare ZONE_SPECIFIED
 
 while getopts :df:hp:s:t:z: OPT; do
     case "${OPT}" in
@@ -172,8 +212,13 @@ while getopts :df:hp:s:t:z: OPT; do
             TTL="${OPTARG}"
             ;;
 
+        w)
+            DO_NOT_WAIT="1"
+            ;;
+
         z)
             ZONE="${OPTARG}"
+            ZONE_SPECIFIED="1"
             ;;
 
         :)
@@ -221,9 +266,15 @@ if [ -z "${TTL}" ]; then
     TTL=5
 fi
 
+printf "starting service discovery...\n"
+
 CLUSTERS="$*"
 for CLUSTER in ${CLUSTERS}; do
-    printf "cluster: %s\n" "${CLUSTER}"
+    printf "\ncluster: %s\n" "${CLUSTER}"
+
+    if [ "${ZONE_SPECIFIED}" == "0" ]; then
+        ZONE="${CLUSTER}"
+    fi
 
     CHANGES=""
 
@@ -252,7 +303,7 @@ for CLUSTER in ${CLUSTERS}; do
 
             RESOURCE_RECORDS="${RESOURCE_RECORDS#,}"
 
-            CHANGE="$(__change "${SERVICE}" "${RESOURCE_RECORDS}" "${ZONE:-${CLUSTER}}" "${TTL}" "${PREFIX}" "${SUFFIX}")"
+            CHANGE="$(__change "${SERVICE}" "${RESOURCE_RECORDS}" "${ZONE}" "${TTL}" "${PREFIX}" "${SUFFIX}")"
 
             CHANGES="${CHANGES},${CHANGE}"
         fi
@@ -262,7 +313,38 @@ for CLUSTER in ${CLUSTERS}; do
 
     CHANGE_BATCH="$(__change_batch "${CHANGES}")"
 
-    printf "\nchange batch:\n\n%s\n" "${CHANGE_BATCH}"
+    if [ -n "${CHANGE_BATCH}" ]; then
+        printf "\nchange batch:\n\n%s\n\n" "${CHANGE_BATCH}"
+
+        ZONE_ID="$(__list_hosted_zones "${ZONE}")"
+
+        if [ -n "${ZONE_ID}" ]; then
+            ZONE_ID="${ZONE_ID##*/}"
+            printf "zone id: %s\n" "${ZONE_ID}"
+
+            if [ "${DRY_RUN}" != "1" ]; then
+                printf "sending change batch...\n"
+                CHANGE_INFO="$(__change_resource_record_sets "${ZONE_ID}" "${CHANGE_BATCH}")"
+                CHANGE_INFO="${CHANGE_INFO##*/}"
+                printf "change info: %s\n" "${CHANGE_INFO}"
+
+                if [ -z "${DO_NOT_WAIT}" ]; then
+                    printf "waiting for the change batch to be synced...\n"
+                    __wait_resource_record_sets_changed "${CHANGE_INFO}"
+                    printf "done.\n"
+                fi
+            else
+                printf "dry-run.\n"
+            fi
+        else
+            printf "fatal error: zone not found ('%s')\n" "${ZONE}" >&2
+            exit 1
+        fi
+    else
+        printf "no changes required.\n"
+    fi
 done
+
+printf "\nservice discovery completed.\n"
 
 exit 0
