@@ -7,7 +7,7 @@ Usage: ecs-service-discovery.sh [options] cluster...
 
 Options:
   -d             Perform a dry-run without making any changes.
-  -f <filter>    Filter service names using a grep-compatible regex.
+  -f <filter>    Filter service names using a bash-compatible regex.
   -p <prefix>    Prefix to put in front of the service name in Route 53.
   -s <suffix>    Suffix to append to the service name in Route 53.
   -t <ttl>       TTL in seconds for the A records in Route 53 (default: 5).
