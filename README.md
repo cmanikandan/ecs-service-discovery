@@ -1,9 +1,9 @@
 # ecs-service-discovery
 
-A handy bash script, that automatically discovers the services running on an AWS
-ECS cluster, and creates/updates corresponding `A` records in a Route 53 zone.
-The record names are based on the services and will point to the IP addresses
-under which the services are currently available.
+A handy shell script, that automatically discovers the services running on an
+AWS ECS cluster, and creates/updates corresponding `A` records in a Route 53
+zone. The record names are based on the services and will point to the IP
+addresses under which the services are currently available.
 
 ## Background
 
